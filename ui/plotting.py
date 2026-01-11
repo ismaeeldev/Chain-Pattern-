@@ -277,7 +277,22 @@ class PlottingCanvas(tk.Frame):
 
     def plot_time_series(self, x, y):
         # Themed Plot (Standard)
-        self.ax.plot(x, y, label='Series', color=COLORS["accent"], linewidth=1.5)
+        # Optimization: Downsample if > 10k points for display
+        # Keep features (peaks/troughs) correct by plotting on full data? 
+        # Peaks/troughs are scatters, they handle themselves.
+        # The line itself needs downsampling.
+        
+        limit = 10000
+        if len(x) > limit:
+            # Simple decimation: Take every Nth point
+            step = len(x) // limit
+            x_plot = x.iloc[::step]
+            y_plot = y.iloc[::step]
+        else:
+            x_plot = x
+            y_plot = y
+            
+        self.ax.plot(x_plot, y_plot, label='Series', color=COLORS["accent"], linewidth=1.5)
 
     def plot_bar_chart(self, x, y):
         # Stem Plot style for performance & alignment
@@ -639,46 +654,85 @@ class PlottingCanvas(tk.Frame):
                                           linewidth=1, linestyle='dashed', alpha=0.5, zorder=3)
                 self.ax.add_patch(patch)
 
-        # Ensure hover event is connected
         if not hasattr(self, 'cid_motion'):
             self.cid_motion = self.canvas.mpl_connect("motion_notify_event", self.on_dna_hover)
             
+        # Hook for Blitting Cache
+        self.canvas.mpl_connect("draw_event", self.on_draw)
+        
         self.canvas.draw()
         
+    def on_draw(self, event):
+        """Cache the background (minus tooltip) for blitting."""
+        if hasattr(self, 'ax') and self.ax:
+             # DrawEvent is global. We just want to capture the background of our main axes.
+             self.bg_cache = self.canvas.copy_from_bbox(self.ax.bbox)
+
     def on_dna_hover(self, event):
         """
-        Optimized hover using Spatial Index (1D X-check).
+        Optimized hover using Spatial Index + Blitting + Throttling.
         """
+        # 1. Throttling (30ms ~ 30FPS)
+        import time
+        now = time.time()
+        if hasattr(self, '_last_hover_time') and (now - self._last_hover_time < 0.03):
+            return
+        self._last_hover_time = now
+
         if event.inaxes != self.ax or self.viz_mode == "histogram":
             if hasattr(self, 'annot') and self.annot.get_visible():
                 self.annot.set_visible(False)
-                self.canvas.draw_idle()
+                self._safe_draw()
             return
             
         x_mouse = event.xdata
         if x_mouse is None: return
         
-        # Spatial Index Search (Linear is fast enough for 10-100 matches, binary search if >1000)
-        # Since matches are usually < 100, linear is instant.
-        
         found_dna = None
         found_coords = None
         
+        # Linear Spatial Search
         for (x_min, x_max, dna) in self.dna_spatial_index:
             if x_min <= x_mouse <= x_max:
                 found_dna = dna
-                # Center of block for tooltip
                 found_coords = (x_min + (x_max - x_min)/2, self.ax.get_ylim()[1] * 0.8)
                 break
                 
         if found_dna:
             self.update_tooltip_optimized(found_dna, found_coords)
             self.annot.set_visible(True)
-            self.canvas.draw_idle()
+            self._blit_draw()
         else:
             if hasattr(self, 'annot') and self.annot.get_visible():
                 self.annot.set_visible(False)
-                self.canvas.draw_idle()
+                self._safe_draw() # Full redraw to clear tooltip if blitting complexity is too high
+                # Actually, can we blit "clean" background to hide? Yes.
+                self._blit_draw()
+
+    def _blit_draw(self):
+        """
+        Fast rendering using blit.
+        """
+        if hasattr(self, 'bg_cache') and self.bg_cache:
+            try:
+                # 1. Restore Clean Background
+                self.canvas.restore_region(self.bg_cache)
+                
+                # 2. Draw ONLY the tooltip (Animated Artist)
+                if self.annot.get_visible():
+                    self.ax.draw_artist(self.annot)
+                    
+                # 3. Blit the specific bbox
+                self.canvas.blit(self.ax.bbox)
+                return
+            except Exception:
+                # Fallback to standard
+                pass
+        
+        self.canvas.draw_idle()
+
+    def _safe_draw(self):
+        self.canvas.draw_idle()
 
     def update_tooltip_optimized(self, dna, coords):
         if not hasattr(self, 'annot'):
@@ -686,17 +740,18 @@ class PlottingCanvas(tk.Frame):
                                           textcoords="offset points",
                                           bbox=dict(boxstyle="round,pad=0.5", fc=COLORS["bg_card"], ec=COLORS["accent"], alpha=0.95),
                                           color=COLORS["text_light"],
-                                          fontname="Segoe UI", fontsize=9, ha='center')
+                                          fontname="Segoe UI", fontsize=9, ha='center', animated=True)
                                           
         self.annot.xy = coords
         
-        # Text - Emojis replaced to avoid Font Warnings on Windows
+        # Text
         source_icon = "[QUERY]" if dna.source_type == 'QUERY' else "[MATCH]"
         similarity_txt = f"{int(dna.similarity*100)}%" if dna.similarity else "Ref"
         
-        text = (f"{source_icon} {dna.id[:6]}...\n"
+        text = (f"{source_icon} {dna.id[:6]}\n"
                 f"Type: {dna.source_type}\n"
                 f"Sim: {similarity_txt}\n"
                 f"Idx: {dna.range_idx[0]}-{dna.range_idx[1]}")
         
         self.annot.set_text(text)
+

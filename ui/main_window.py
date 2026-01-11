@@ -162,7 +162,7 @@ class CPASMainWindow:
 
     def run_dna_search(self):
         """
-        DNA Pattern Search Engine (KMP/NW/AC)
+        DNA Pattern Search Engine (Async)
         """
         if not hasattr(self, 'chain') or not self.chain:
             self.log("Error: No DNA Chain generated. Please 'Detect Extrema' first.")
@@ -170,7 +170,7 @@ class CPASMainWindow:
             
         # 1. Check for Selection (Query)
         from cpas.models.identity import PatternDNA
-        from cpas.algorithms import kmp, needleman_wunsch, to_string
+        from cpas.algorithms import to_string
         
         if not hasattr(self, 'anchor_manager') or not self.anchor_manager.current_anchor:
             self.log("⚠️ Please select a pattern region on the chart first.")
@@ -195,7 +195,7 @@ class CPASMainWindow:
             return
             
         # Create Query Identity
-        q_seq = [w.w_type for w in query_widgets]
+        q_seq = [w.w_type for w in query_widgets] # This is a list of strings
         query_dna = PatternDNA(
              sequence=q_seq, 
              range_idx=(query_widgets[0].start_idx, query_widgets[-1].end_idx),
@@ -203,23 +203,33 @@ class CPASMainWindow:
              dataset_name="Current"
         )
         
-        self.log(f"🧬 Encoding Query DNA [{query_dna.label}]: {' '.join(q_seq)}")
+        self.log(f"🧬 Query DNA [{query_dna.label}]: {' '.join(q_seq)}")
         
+        if not hasattr(self, 'async_processor'):
+            from cpas.core.async_ops import AsyncProcessor
+            self.async_processor = AsyncProcessor(lambda f: self.root.after(0, f))
+
         mode = self.dna_mode_var.get()
-        self.log(f"🧠 Neural Scan ({mode})...")
+        self.log(f"🧠 Scanning Genome ({mode})...")
+        self.root.config(cursor="wait")
         
-        matches_dna = []
-        
-        # SEARCH LOGIC
         full_seq = [w.w_type for w in self.chain.widgets]
         
-        if "KMP" in mode or "Exact" in mode:
-            # Exact Match using KMP
-            res = kmp.run(full_seq, target_sequence=q_seq, pattern=to_string(q_seq))
-            indices = res.get('matches', [])
+        # Callback
+        def on_search_complete(result):
+            self.root.config(cursor="")
+            if 'error' in result:
+                self.log(f"Search Error: {result['error']}")
+                return
+                
+            indices_data = result.get('indices', []) # List of (idx, score)
+            matches_dna = []
             
-            for idx in indices:
-                if idx == q_start_idx: continue
+            # Map back to objects on Main Thread (Safe)
+            for idx, score in indices_data:
+                # bounds check?
+                if idx + len(query_widgets) > len(self.chain.widgets): continue
+                
                 m_widgets = self.chain.widgets[idx : idx + len(query_widgets)]
                 if not m_widgets: continue
                 
@@ -228,47 +238,28 @@ class CPASMainWindow:
                     range_idx=(m_widgets[0].start_idx, m_widgets[-1].end_idx),
                     source_type="MATCH",
                     parent_id=query_dna.id,
-                    similarity=1.0 
+                    similarity=score
                 )
                 matches_dna.append(match_dna)
                 
-        elif "Needleman" in mode or "Fuzzy" in mode:
-            # Fuzzy Match
-            q_len = len(query_widgets)
-            q_str = to_string(q_seq)
+            self.log(f"✅ Found {len(matches_dna)} Sibling DNA sequences.")
             
-            for i in range(len(full_seq) - q_len + 1):
-                if i == q_start_idx: continue
-                window_seq = full_seq[i : i + q_len] # Fixed window
+            # Visualize
+            all_dna = [query_dna] + matches_dna
+            if hasattr(self, 'plotting_canvas'):
+                self.plotting_canvas.plot_dna_layer(all_dna, self.df['timestamp'])
                 
-                # Pre-check exact string for speed
-                if to_string(window_seq) == q_str:
-                     score_pct = 1.0
-                else:
-                    nw_res = needleman_wunsch.run(window_seq, target_sequence=q_seq)
-                    raw_score = nw_res.get('score', 0)
-                    score_pct = max(0, raw_score / q_len)
-                    
-                if score_pct >= 0.70:
-                     m_widgets = self.chain.widgets[i : i + q_len]
-                     match_dna = PatternDNA(
-                        sequence=[w.w_type for w in m_widgets],
-                        range_idx=(m_widgets[0].start_idx, m_widgets[-1].end_idx),
-                        source_type="MATCH",
-                        parent_id=query_dna.id,
-                        similarity=score_pct
-                    )
-                     matches_dna.append(match_dna)
-                     
-        self.log(f"✅ Found {len(matches_dna)} Sibling DNA sequences.")
-        
-        # 3. Visualize
-        all_dna = [query_dna] + matches_dna
-        if hasattr(self, 'plotting_canvas'):
-            self.plotting_canvas.plot_dna_layer(all_dna, self.df['timestamp'])
-            
-        # 4. Populate Ranked List
-        self.update_match_list(matches_dna)
+            # Ranked List
+            self.update_match_list(matches_dna)
+
+        # Submit
+        self.async_processor.submit_dna_search(
+            full_seq=full_seq,
+            q_seq=q_seq,
+            mode=mode,
+            key_context={'ignore_idx': q_start_idx},
+            callback=on_search_complete
+        )
 
     def update_match_list(self, matches):
         """
@@ -645,25 +636,47 @@ class CPASMainWindow:
             messagebox.showwarning("Warning", "No data loaded.")
             return
 
-        try:
-            from cpas.core.extrema import ExtremaDetector
-            prom = self.prominence_var.get()
-            
-            results = ExtremaDetector.detect(self.df['value'].values, prominence=prom, distance=10)
-            self.peaks = results['peaks']
-            self.troughs = results['troughs']
+        # Initialize Async Processor if needed
+        if not hasattr(self, 'async_processor'):
+            from cpas.core.async_ops import AsyncProcessor
+            # Pass root.after as scheduler
+            self.async_processor = AsyncProcessor(lambda f: self.root.after(0, f))
+
+        self.log("🧠 Analyzing Extrema (Background)...")
+        self.root.config(cursor="wait")
+        
+        prom = self.prominence_var.get()
+        
+        def on_complete(result):
+            self.root.config(cursor="")
+            if 'error' in result:
+                self.log(f"Extrema Error: {result['error']}")
+                return
+                
+            self.peaks = result['peaks']
+            self.troughs = result['troughs']
+            self.chain = result['chain'] # Chain is widget object list
             
             count = len(self.peaks) + len(self.troughs)
             self.card_extrema.config(text=f"{count:,}")
-            self.log(f"Extrema: {len(self.peaks)} Peaks, {len(self.troughs)} Troughs")
+            self.log(f"Extrema Found: {len(self.peaks)} Peaks, {len(self.troughs)} Troughs")
             
-            from cpas.core.widgets import WidgetGenerator
-            self.chain = WidgetGenerator.generate_chain(self.df['value'].values, self.peaks, self.troughs)
-            
+            # Draw
             self.plotting_canvas.plot_data(self.df['timestamp'], self.df['value'], self.peaks, self.troughs)
+            self.log("Analysis Complete.")
+
+        try:
+             # Submit Task
+             self.async_processor.submit_extrema_detection(
+                 self.df['value'].values, 
+                 prominence=prom, 
+                 distance=10, 
+                 callback=on_complete
+             )
             
         except Exception as e:
-            self.log(f"Extrema Error: {e}")
+            self.log(f"Async Error: {e}")
+            self.root.config(cursor="")
 
     def generate_recurrence(self):
         if not hasattr(self, 'df'): return
