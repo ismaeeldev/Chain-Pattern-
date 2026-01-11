@@ -8,8 +8,15 @@ class DatabaseManager:
     SRS: "Persist ALL... Uploaded datasets... Extrema... Widget chains... Pattern templates".
     """
     
-    def __init__(self, db_path="cpas_storage.db"):
-        self.db_path = db_path
+    def __init__(self, db_path=None):
+        if db_path is None:
+            # Professional Path: Documents/CPAS
+            base_dir = os.path.join(os.path.expanduser("~"), "Documents", "CPAS")
+            os.makedirs(base_dir, exist_ok=True)
+            self.db_path = os.path.join(base_dir, "cpas_storage.db")
+        else:
+            self.db_path = db_path
+            
         self._init_db()
         
     def _init_db(self):

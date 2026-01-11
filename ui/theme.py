@@ -117,4 +117,23 @@ def setup_theme(root):
         selectforeground=[("readonly", COLORS["accent"])]
     )
 
+    # -- Treeview (Dark Theme) --
+    style.configure("Treeview",
+        background=COLORS["bg_card"],
+        fieldbackground=COLORS["bg_card"],
+        foreground=COLORS["text_light"],
+        borderwidth=0,
+        font=FONTS["small"]
+    )
+    style.configure("Treeview.Heading",
+        background=COLORS["bg_dark"],
+        foreground=COLORS["text_light"],
+        font=FONTS["small"],
+        relief="flat"
+    )
+    style.map("Treeview",
+        background=[('selected', COLORS["accent"])],
+        foreground=[('selected', '#ffffff')]
+    )
+
     return style
