@@ -6,9 +6,23 @@ from matplotlib.widgets import SpanSelector
 import matplotlib.collections as mcoll
 from matplotlib.patches import Rectangle
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import threading
+import time
+import numpy as np
 
 # Import Theme colors for seamless integration
 from cpas.ui.theme import COLORS
+
+class Debouncer:
+    def __init__(self, interval):
+        self.interval = interval
+        self.timer = None
+
+    def call(self, func):
+        if self.timer is not None:
+            self.timer.cancel()
+        self.timer = threading.Timer(self.interval, func)
+        self.timer.start()
 
 class PlottingCanvas(tk.Frame):
     def __init__(self, parent):
@@ -21,6 +35,12 @@ class PlottingCanvas(tk.Frame):
         self.last_dna_objects = None
         self.last_x = None
         self.last_y = None
+        
+        # Zoom Optimization
+        self.zoom_debouncer = Debouncer(0.05) # 50ms
+        self.full_x = None
+        self.full_y = None
+        self.main_line = None
         
         # 1. Modern Styyyyyle
         # Use a context manager or global style? Global for app consistency.
@@ -216,7 +236,7 @@ class PlottingCanvas(tk.Frame):
         # but often Y is auto-scaled. Let's zoom both.
         ax.set_ylim([ycenter - yheight/2, ycenter + yheight/2])
         
-        self.canvas.draw()
+        self.canvas.draw_idle()
         
         # Push to navigation stack if possible so 'Back' works?
         # Standard toolbar push_current() is complex to invoke from outside.
@@ -273,26 +293,103 @@ class PlottingCanvas(tk.Frame):
             for text in leg.get_texts():
                 text.set_color(COLORS["text_light"])
             
-        self.canvas.draw()
+        self.canvas.draw_idle()
+
+    def setup_callbacks(self):
+        # Connect to limits change
+        self.ax.callbacks.connect('xlim_changed', self.on_xlim_changed)
+
+    def on_xlim_changed(self, event_ax):
+        """Debounced Viewport Update"""
+        if event_ax != self.ax: return
+        self.zoom_debouncer.call(lambda: self.after_idle(self.update_viewport))
+
+    def after_idle(self, func):
+        self.canvas_widget.after(0, func)
+
+    def update_viewport(self):
+        """Slices data to visible range for high performance."""
+        if self.full_x is None or self.main_line is None:
+            return
+            
+        # Get current limits
+        x_min, x_max = self.ax.get_xlim()
+        
+        if self.full_x_np is None: return
+        
+        try:
+             # Handle Date Conversion
+             import matplotlib.dates as mdates
+             import pandas as pd
+             
+             # Fallback buffer indices
+             idx_min = 0
+             idx_max = len(self.full_x_np)
+             
+             is_date = isinstance(self.full_x_np[0], (pd.Timestamp, np.datetime64, float))
+             
+             # If data is Timestamps, MPL limits are floats (days since epoch).
+             # We must convert MPL limits -> Timestamps to search.
+             # OR convert data to MPL nums (expensive).
+             
+             if isinstance(self.full_x_np[0], (pd.Timestamp, np.datetime64)):
+                 try:
+                     t_min = mdates.num2date(x_min).replace(tzinfo=None)
+                     t_max = mdates.num2date(x_max).replace(tzinfo=None)
+                     
+                     # Ensure full_x_np is timezone-naive if t_min is naive
+                     # This comparison often fails in pandas/numpy if mismatched.
+                     # Quick fix: Use searchsorted on VALUES if they match.
+                     
+                     idx_min = np.searchsorted(self.full_x_np, t_min)
+                     idx_max = np.searchsorted(self.full_x_np, t_max)
+                 except Exception:
+                     # If basic conversion failed, maybe data is already float? no.
+                     # Just fallback to full range.
+                     idx_min = 0
+                     idx_max = len(self.full_x_np)
+             else:
+                 # Standard Numeric
+                 idx_min = np.searchsorted(self.full_x_np, x_min)
+                 idx_max = np.searchsorted(self.full_x_np, x_max)
+                 
+             # Buffer (Avoid edge artifacts)
+             buffer = 100
+             idx_min = max(0, idx_min - buffer)
+             idx_max = min(len(self.full_x_np), idx_max + buffer)
+             
+             # Slice
+             sx = self.full_x_np[idx_min:idx_max]
+             sy = self.full_y_np[idx_min:idx_max]
+             
+             # Update Line
+             self.main_line.set_data(sx, sy)
+             self.canvas.draw_idle()
+             
+        except Exception as e:
+            # Fallback for safety (don't slice, just show all or don't update)
+            # print(f"Viewport Update Error: {e}") 
+            pass
 
     def plot_time_series(self, x, y):
-        # Themed Plot (Standard)
-        # Optimization: Downsample if > 10k points for display
-        # Keep features (peaks/troughs) correct by plotting on full data? 
-        # Peaks/troughs are scatters, they handle themselves.
-        # The line itself needs downsampling.
+        # 1. Store Full Data (Optimized references)
+        self.full_x = x
+        self.full_y = y
         
-        limit = 10000
-        if len(x) > limit:
-            # Simple decimation: Take every Nth point
-            step = len(x) // limit
-            x_plot = x.iloc[::step]
-            y_plot = y.iloc[::step]
-        else:
-            x_plot = x
-            y_plot = y
+        # Convert to numpy for fast slicing
+        if hasattr(x, 'values'): self.full_x_np = x.values
+        else: self.full_x_np = np.array(x)
             
-        self.ax.plot(x_plot, y_plot, label='Series', color=COLORS["accent"], linewidth=1.5)
+        if hasattr(y, 'values'): self.full_y_np = y.values
+        else: self.full_y_np = np.array(y)
+        
+        # Initial Plot
+        self.main_line, = self.ax.plot(x, y, label='Series', color=COLORS["accent"], linewidth=1.5)
+        
+        # Setup Dynamic Listener
+        if not hasattr(self, '_cb_connected'):
+            self.setup_callbacks()
+            self._cb_connected = True
 
     def plot_bar_chart(self, x, y):
         # Stem Plot style for performance & alignment
@@ -311,7 +408,7 @@ class PlottingCanvas(tk.Frame):
         self.ax.clear()
         cax = self.ax.imshow(matrix, cmap='Blues', origin='lower') # 'Blues' fits better than 'Greys'
         self.ax.set_title("Recurrence Plot", color=COLORS["text_light"])
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def request_clear(self):
         if hasattr(self, 'on_clear_request'):
@@ -374,7 +471,7 @@ class PlottingCanvas(tk.Frame):
             )
             self.ax.add_patch(rect)
             
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def plot_dna_layer(self, dna_objects, x_data):
         """
@@ -478,7 +575,7 @@ class PlottingCanvas(tk.Frame):
         if not hasattr(self, 'cid_motion'):
             self.cid_motion = self.canvas.mpl_connect("motion_notify_event", self.on_dna_hover)
             
-        self.canvas.draw()
+        self.canvas.draw_idle()
         
     def on_dna_hover(self, event):
         """
@@ -555,7 +652,7 @@ class PlottingCanvas(tk.Frame):
             self.ax.text(0.5, 0.95, "DNA Overlays Disabled in Histogram Mode", 
                          transform=self.ax.transAxes, ha='center', color=COLORS["warning"],
                          bbox=dict(facecolor=COLORS["bg_card"], alpha=0.8, boxstyle='round'))
-            self.canvas.draw()
+            self.canvas.draw_idle()
             return
         
         if not dna_objects:
@@ -660,7 +757,7 @@ class PlottingCanvas(tk.Frame):
         # Hook for Blitting Cache
         self.canvas.mpl_connect("draw_event", self.on_draw)
         
-        self.canvas.draw()
+        self.canvas.draw_idle()
         
     def on_draw(self, event):
         """Cache the background (minus tooltip) for blitting."""

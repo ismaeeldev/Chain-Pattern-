@@ -413,15 +413,18 @@ class CPASMainWindow:
         self.btn_view_rec = ttk.Button(switcher_frame, text="Recurrence Plot", command=lambda: self.switch_view("rec"), style="Secondary.TButton")
         self.btn_view_rec.pack(side=tk.LEFT)
         
-        # -- Bottom Panel (Packed FIRST to reserve bottom space) --
-        # Reduced height from 280 -> 120 (Giant Chart)
-        bottom_pane = ttk.Frame(self.content_area, style="TFrame", height=120)
-        bottom_pane.pack(side=tk.BOTTOM, fill=tk.X)
-        bottom_pane.pack_propagate(False) # Strict height enforcement
-
-        # -- Visualization Container (Packed LAST to take all remaining space) --
+        # Fullscreen Toggle
+        self.btn_fullscreen = ttk.Button(switcher_frame, text="⛶ Fullscreen", command=self.toggle_fullscreen, style="TButton")
+        self.btn_fullscreen.pack(side=tk.RIGHT)
+        self.is_fullscreen = False
+        
+        # -- Main Content Layout --
+        # Top: Visualization (Charts) - Takes all available space
+        # Bottom: Collapsible Panel (Fixed Header + Toggleable Content)
+        
+        # 1. Viz Container (Top)
         self.viz_container = ttk.Frame(self.content_area, style="Card.TFrame") 
-        self.viz_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 20))
+        self.viz_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 0))
         
         # View 1: Time Series
         self.view_ts = ttk.Frame(self.viz_container, style="TFrame")
@@ -443,61 +446,65 @@ class CPASMainWindow:
         self.view_ts.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.view_rec.place_forget()
         
-        # Algorithms List (Custom Scrollable Cards)
-        algo_frame = ttk.Frame(bottom_pane, style="Card.TFrame", padding=10)
-        algo_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 15))
+        # -- Bottom Tabs (Notebook) --
+        # 2. Bottom Panel (Collapsible)
+        self.bottom_panel_container = ttk.Frame(self.content_area, style="Card.TFrame")
+        self.bottom_panel_container.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
         
-        ttk.Label(algo_frame, text="ALGORITHMS", style="CardTitle.TLabel", font=FONTS["h3"]).pack(anchor="w", pady=(0,10))
+        # Header Bar
+        self.bottom_header = ttk.Frame(self.bottom_panel_container, style="Card.TFrame", height=32)
+        self.bottom_header.pack(side=tk.TOP, fill=tk.X)
+        self.bottom_header.pack_propagate(False) 
         
-        # Scrollable Area
-        self.algo_scroll = ScrollableFrame(algo_frame)
-        self.algo_scroll.pack(fill=tk.BOTH, expand=True)
+        # Tabs
+        self.tabs_frame = ttk.Frame(self.bottom_header, style="Card.TFrame")
+        self.tabs_frame.pack(side=tk.LEFT, fill=tk.Y, padx=10)
         
-        # Populate Algorithms
-        algorithms = [
-            ("Needleman-Wunsch", "Global alignment"),
-            ("Smith-Waterman", "Local alignment"),
-            ("Levenshtein", "Edit distance"),
-            ("Kruskal-Katona", "Shadow of k-grams"),
-            ("Aho-Corasick", "Pattern matching"),
-            ("KMP", "Knuth-Morris-Pratt"),
-            ("Boyer-Moore", "String search"),
-            ("De Bruijn", "Sequence assembly"),
-            ("Thue-Morse", "Infinite sequence"),
-            ("Burnside's Lemma", "Orbit counting"),
-            ("Polya Enumeration", "Colorings"),
-            ("Palindromic Complexity", "Symmetry"),
-            ("Lyndon Factorization", "String decomp"),
-            ("Kasiski Examination", "Crypto analysis"),
-            ("Index of Coincidence", "Stat analysis")
-        ]
+        self.active_tab = None
+        self.panel_expanded = False
+        self.tab_buttons = {}
         
-        self.algo_cards = {}
-        for name, desc in algorithms:
-            # Pass self.run_algorithm as callback
-            card = AlgorithmCard(self.algo_scroll.scrollable_frame, name, desc, "all", self.on_algo_select, self.run_algorithm)
-            card.pack(fill=tk.X, pady=2, padx=2)
-            self.algo_cards[name] = card
-            
-        # Run Button Removed (Moved to Cards)
-        # run_btn = ttk.Button(algo_frame, text="Run Algorithm ▷", command=self.run_algorithm, style="TButton")
-        # run_btn.pack(side=tk.BOTTOM, fill=tk.X, pady=(15,0))
-
-        # Console Log
-        log_frame = ttk.Frame(bottom_pane, style="Card.TFrame", padding=10)
-        log_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        # Tabs
+        self.btn_tab_widgets = self._create_panel_tab("Widgets", "widgets")
+        self.btn_tab_algos = self._create_panel_tab("Algorithms", "algos")
+        self.btn_tab_console = self._create_panel_tab("Console", "console")
         
-        ttk.Label(log_frame, text="SYSTEM CONSOLE", style="CardTitle.TLabel", font=FONTS["h3"]).pack(anchor="w", pady=(0,10))
+        # Expand/Collapse Indicator
+        self.btn_expand = ttk.Label(self.bottom_header, text="▲", style="CardTitle.TLabel", cursor="hand2")
+        self.btn_expand.pack(side=tk.RIGHT, padx=15, pady=5)
+        self.btn_expand.bind("<Button-1>", lambda e: self.toggle_panel_state())
         
-        # Console Style Text widget
+        # Content Area (Hidden)
+        self.bottom_content = ttk.Frame(self.bottom_panel_container, style="TFrame", height=280)
+        # self.bottom_content.pack(...) # Managed by toggle logic
+        
+        # Content Panes
+        from cpas.ui.widget_bank import WidgetBank
+        
+        # P1: Widgets
+        self.pane_widgets = WidgetBank(self.bottom_content, 
+                                     on_widget_click=self.jump_to_widgets,
+                                     on_search_request=self.request_search_pattern)
+        # Keep ref for compatibility?
+        self.widget_bank = self.pane_widgets
+        
+        # P2: Algos
+        self.pane_algos = ttk.Frame(self.bottom_content, style="Card.TFrame")
+        self._setup_algo_content(self.pane_algos)
+        
+        # P3: Console
+        self.pane_console = ttk.Frame(self.bottom_content, style="Card.TFrame")
+        log_frame = ttk.Frame(self.pane_console, style="Card.TFrame", padding=10)
+        log_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Console Widget
         self.log_text = tk.Text(
             log_frame, 
-            bg="#0f172a", # Darker than card
+            bg="#0f172a", 
             fg=COLORS["text_light"], 
             font=FONTS["mono"],
             borderwidth=0, 
-            highlightthickness=1,
-            highlightbackground=COLORS["border"],
+            highlightthickness=0,
             state=tk.DISABLED,
             padx=10, pady=10
         )
@@ -664,6 +671,14 @@ class CPASMainWindow:
             # Draw
             self.plotting_canvas.plot_data(self.df['timestamp'], self.df['value'], self.peaks, self.troughs)
             self.log("Analysis Complete.")
+            
+            # Populate Widget Bank
+            # Populate Widget Bank
+            if hasattr(self, 'widget_bank'):
+                self.widget_bank.load_widgets(self.chain)
+                # Auto-open Widgets panel (force open)
+                self.toggle_panel("widgets")
+                if not self.panel_expanded: self.toggle_panel_state(force_open=True)
 
         try:
              # Submit Task
@@ -682,23 +697,50 @@ class CPASMainWindow:
         if not hasattr(self, 'df'): return
         from cpas.core.recurrence import RecurrencePlot
         
+        # 1. Determine Range
         if hasattr(self, 'anchor_manager'):
             s, e = self.anchor_manager.get_active_range(len(self.df))
         else:
             s, e = 0, len(self.df)
             
-        values = self.df['value'].values[s:e]
-        try:
-            matrix, _ = RecurrencePlot.generate_matrix(values)
-            self.recurrence_canvas.plot_recurrence(matrix)
-            self.log("Recurrence Plot Updated.")
+        # 2. Check for Widget Chain (Primary Source now)
+        if hasattr(self, 'chain') and self.chain:
+            # Filter widgets in range
+            selected_widgets = [w for w in self.chain.widgets if w.start_idx >= s and w.end_idx <= e]
             
-            # Hide button on success
-            if hasattr(self, 'rec_gen_btn'):
-                self.rec_gen_btn.place_forget()
+            if not selected_widgets:
+                self.log("⚠️ No widgets found in selection for Recurrence Plot.")
+                return
+
+            # Map Types to Ints
+            type_map = {'P2P': 1, 'T2T': 2, 'P2T': 3, 'T2P': 4}
+            values = [type_map.get(w.w_type, 0) for w in selected_widgets]
+            
+            self.log(f"🔄 Recurrence: Analyzing {len(values)} Widgets (Structural Mode).")
+            
+            # Use discrete matching (threshold < 1, normalize False)
+            try:
+                matrix, _ = RecurrencePlot.generate_matrix(values, threshold=0.1, normalize=False)
+                self.recurrence_canvas.plot_recurrence(matrix)
                 
-        except Exception as e:
-            self.log(f"Recurrence Error: {e}")
+                # Check bounds for highlight?
+                # Recurrence plot usually plots 0..N indices. 
+                # These match the WIDGET list, not time series.
+                # So axis should be "Widget Index".
+                
+                # Hide button on success
+                if hasattr(self, 'rec_gen_btn'):
+                    self.rec_gen_btn.place_forget()
+                    
+            except Exception as e:
+                self.log(f"Recurrence Error: {e}")
+                
+        else:
+            # Fallback to Time Series if no chain? (Or Warning?)
+            # User said "Recurrence plot must be regenerated using Widget-aligned sequence".
+            # So fallback is discouraged.
+            self.log("⚠️ Please Detect Extrema first. Recurrence now analyzes Widget Structure.")
+
 
     def run_algorithm(self):
         # Changed to use selected_algo_card
@@ -895,3 +937,257 @@ class CPASMainWindow:
                     messagebox.showerror("Error", "Failed to save template (Duplicate name?).")
             except Exception as e:
                 self.log(f"Template Save Error: {e}")
+
+    def jump_to_widgets(self, widgets):
+        """
+        Callback from WidgetBank.
+        Zooms chart to show the selected widgets and highlights them.
+        """
+        if not widgets or not hasattr(self, 'df'): return
+        
+        # 1. Calculate Range
+        s_idx = min([w.start_idx for w in widgets])
+        e_idx = max([w.end_idx for w in widgets])
+        
+        # 2. Highlight (Set Anchor)
+        if not hasattr(self, 'anchor_manager'):
+            from cpas.core.anchors import AnchorManager
+            self.anchor_manager = AnchorManager()
+            
+        self.anchor_manager.set_anchor(s_idx, e_idx)
+        self.log(f"🔎 Focused on {len(widgets)} widgets (Indices {s_idx}-{e_idx})")
+        
+        # 3. Zoom
+        import matplotlib.dates as mdates
+        
+        # Buffer
+        duration = e_idx - s_idx
+        # Ensure buffer is reasonable (at least 20 points or 50% of duration)
+        buffer = max(20, int(duration * 0.5)) 
+        
+        s_vis = max(0, s_idx - buffer)
+        e_vis = min(len(self.df)-1, e_idx + buffer)
+        
+        ts_start = self.df['timestamp'].iloc[s_vis]
+        ts_end = self.df['timestamp'].iloc[e_vis]
+        
+        try:
+            t1 = mdates.date2num(ts_start)
+            t2 = mdates.date2num(ts_end)
+            self.plotting_canvas.ax.set_xlim(t1, t2)
+            self.plotting_canvas.canvas.draw()
+        except Exception as e:
+            self.log(f"Zoom Error: {e}")
+
+    def request_search_pattern(self, widgets):
+        """
+        Callback from WidgetBank.
+        Uses selected widgets as the query pattern for DNA search.
+        """
+        if not widgets: return
+        
+        self.log(f"🧬 Pattern Request: {len(widgets)} widgets selected.")
+        
+        # 1. Set Anchor to this range (Visual Confirmation)
+        self.jump_to_widgets(widgets)
+        
+        # 2. Trigger Search
+        # Since jump_to_widgets sets the anchor, run_dna_search will use it naturally.
+        # We enforce a UI update to ensure any async state is ready if needed, 
+        # but calling directly is fine on Main Thread.
+        self.run_dna_search()
+
+    def toggle_fullscreen(self):
+        """
+        Toggles Fullscreen Chart Mode by hiding/showing panels.
+        Safe implementation: Visbility toggle only.
+        """
+        self.is_fullscreen = not self.is_fullscreen
+        
+        if self.is_fullscreen:
+            # Go Fullscreen
+            self.sidebar.pack_forget()
+            self.stats_frame.pack_forget()
+            # Note: Switcher Frame remains visible as toolbar
+            
+            # Hide Bottom Panel (Collapsible)
+            if hasattr(self, 'bottom_panel_container'):
+                self.bottom_panel_container.pack_forget()
+            
+            # Expand content area to remove padding?
+            self.content_area.pack_configure(padx=0, pady=0)
+            
+            self.btn_fullscreen.config(text="Exit Fullscreen")
+            self.log("Entered Fullscreen Mode.")
+        else:
+            # Restore
+            # Sidebar was packed LEFT
+            self.sidebar.pack(side=tk.LEFT, fill=tk.Y, before=self.content_area)
+            
+            # Restore padding
+            self.content_area.pack_configure(padx=25, pady=25)
+            
+            # Restore Stats (Top of content)
+            # Find what is currently at top? Switcher frame.
+            # We want stats ABOVE viz container.
+            # Actually layout was: stats -> card -> switcher -> viz -> bottom.
+            # viz is TOP, bottom is BOTTOM.
+            # so stats should be packed TOP, BEFORE switcher if we can reference it?
+            # Or just TOP? Tkinter packs in order. 
+            # If we repack stats NOW, it will go to the BOTTOM of the TOP stack?
+            # Re-ordering is tricky in Tkinter without `before/after`.
+            # Usage: `pack(before=widget)`.
+            # We want stats before `viz_container`.
+            if hasattr(self, 'viz_container'):
+                 self.stats_frame.pack(side=tk.TOP, fill=tk.X, pady=(0, 20), before=self.viz_container)
+                 
+            # Note: Switcher frame is likely ABOVE viz_container too. 
+            # If switcher frame wasn't hidden, it's still there.
+            # So stats should be before switcher if possible?
+            # We don't have self.switcher_frame reference stored?
+            # Wait, `switcher_frame` creation: `switcher_frame = ttk.Frame(...)`.
+            # It's a local variable. I can't reference it easily.
+            # Strategy: Just pack stats before viz_container. It might end up below switcher if switcher is before viz.
+            # But visually stats -> switcher -> viz is better.
+            # If switcher is "older" (packed earlier) than viz.
+            # Let's hope `before=self.viz_container` puts it in valid place.
+            # Actually, `switcher_frame` is packed `pady=(0, 10)` before `viz`.
+            # If I pack stats before `viz`, it might be: Switcher -> Stats -> Viz.
+            # Original was: Stats -> Switcher -> Viz.
+            # Use `before=self.viz_container` and hope for best, or try to reference `self.btn_view_ts.master`?
+            
+            # Attempt to find switcher via button
+            switcher = None
+            if hasattr(self, 'btn_view_ts'):
+                switcher = self.btn_view_ts.master
+                
+            if switcher:
+                self.stats_frame.pack(side=tk.TOP, fill=tk.X, pady=(0, 20), before=switcher)
+            
+            # Restore Bottom Pane
+            if hasattr(self, 'bottom_panel_container'):
+                self.bottom_panel_container.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
+            
+            self.btn_fullscreen.config(text="⛶ Fullscreen")
+            self.log("Exited Fullscreen Mode.")
+
+    # -- Collapsible Panel Helpers --
+    def _create_panel_tab(self, text, code):
+        """Creates a clickable tab label for the bottom panel."""
+        # Visual style: Text label with hover effect
+        lbl = ttk.Label(self.tabs_frame, text=text, style="CardTitle.TLabel", cursor="hand2")
+        lbl.pack(side=tk.LEFT, padx=15, pady=5)
+        
+        def on_click(e):
+            self.toggle_panel(code)
+            
+        lbl.bind("<Button-1>", on_click)
+        
+        # Hover effect
+        def on_enter(e): lbl.configure(foreground=COLORS["accent"])
+        def on_leave(e): 
+            if self.active_tab != code:
+                lbl.configure(foreground=COLORS["text_light"])
+                
+        lbl.bind("<Enter>", on_enter)
+        lbl.bind("<Leave>", on_leave)
+        
+        self.tab_buttons[code] = lbl
+        return lbl
+
+    def toggle_panel(self, code):
+        """Switches tabs. If panel closed, opens it. If same tab clicked, closes it."""
+        if self.active_tab == code and self.panel_expanded:
+            self.toggle_panel_state(resizing=False) # Close
+        else:
+            self.active_tab = code
+            self._show_pane(code)
+            if not self.panel_expanded:
+                self.toggle_panel_state(force_open=True)
+            self._update_tab_styles()
+
+    def _show_pane(self, code):
+        # Unpack all
+        if hasattr(self, 'pane_widgets'): self.pane_widgets.pack_forget()
+        if hasattr(self, 'pane_algos'): self.pane_algos.pack_forget()
+        if hasattr(self, 'pane_console'): self.pane_console.pack_forget()
+        
+        if code == "widgets":
+            self.pane_widgets.pack(fill=tk.BOTH, expand=True)
+        elif code == "algos":
+            self.pane_algos.pack(fill=tk.BOTH, expand=True)
+        elif code == "console":
+            self.pane_console.pack(fill=tk.BOTH, expand=True)
+
+    def toggle_panel_state(self, force_open=False, resizing=True):
+        """Expands or Collapses the bottom panel content."""
+        # Prevent flash by forcing update before animation or change
+        # self.root.update_idletasks() 
+        
+        if force_open:
+            is_open = False 
+        else:
+            is_open = self.panel_expanded
+            
+        if is_open:
+            # Collapse
+            self.bottom_content.pack_forget()
+            self.btn_expand.config(text="▲") # Point up (to open)
+            self.panel_expanded = False
+            self.active_tab = None
+            self._update_tab_styles()
+        else:
+            # Expand
+            if not self.active_tab: self.active_tab = "widgets"
+            self._show_pane(self.active_tab)
+            self._update_tab_styles()
+            
+            self.bottom_content.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self.bottom_content.pack_propagate(False) # Strict height
+            self.btn_expand.config(text="▼") # Point down (to close)
+            self.panel_expanded = True
+            
+        # Force redraw to ensure clean transition
+        # self.root.update_idletasks()
+            
+    def _update_tab_styles(self):
+        for code, lbl in self.tab_buttons.items():
+            if code == self.active_tab:
+                lbl.configure(foreground=COLORS["accent"])
+            else:
+                lbl.configure(foreground=COLORS["text_light"])
+
+    def _setup_algo_content(self, parent):
+        """Populates the Algos pane"""
+        from cpas.ui.components import ScrollableFrame, AlgorithmCard
+        # algo_frame = ttk.Frame(parent, style="Card.TFrame", padding=10) # parent is already frame
+        # We pack into parent directly or create a subframe?
+        # Parent is Content Pane.
+        
+        scroll = ScrollableFrame(parent)
+        scroll.pack(fill=tk.BOTH, expand=True)
+        
+        algorithms = [
+            ("Needleman-Wunsch", "Global alignment"),
+            ("Smith-Waterman", "Local alignment"),
+            ("Levenshtein", "Edit distance"),
+            ("Kruskal-Katona", "Shadow of k-grams"),
+            ("Aho-Corasick", "Pattern matching"),
+            ("KMP", "Knuth-Morris-Pratt"),
+            ("Boyer-Moore", "String search"),
+            ("De Bruijn", "Sequence assembly"),
+            ("Thue-Morse", "Infinite sequence"),
+            ("Burnside's Lemma", "Orbit counting"),
+            ("Polya Enumeration", "Colorings"),
+            ("Palindromic Complexity", "Symmetry"),
+            ("Lyndon Factorization", "String decomp"),
+            ("Kasiski Examination", "Crypto analysis"),
+            ("Index of Coincidence", "Stat analysis")
+        ]
+        
+        self.algo_cards = {}
+        for name, desc in algorithms:
+            card = AlgorithmCard(scroll.scrollable_frame, name, desc, "all", self.on_algo_select, self.run_algorithm)
+            card.pack(fill=tk.X, pady=2, padx=2)
+            self.algo_cards[name] = card
+

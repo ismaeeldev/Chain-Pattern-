@@ -15,6 +15,15 @@ class Widget:
     duration: int  # Timesteps
     w_type: Literal['P2P', 'T2T', 'P2T', 'T2P']
     
+    @property
+    def amplitude(self) -> float:
+        return abs(self.end_val - self.start_val)
+        
+    @property
+    def energy(self) -> float:
+        # Conceptual "Energy": Amplitude * Duration (Area under simplified curve)
+        return self.amplitude * self.duration
+    
     def to_dict(self):
         return {
             "index": self.index,
@@ -23,7 +32,9 @@ class Widget:
             "start_val": float(self.start_val),
             "end_val": float(self.end_val),
             "duration": int(self.duration),
-            "w_type": self.w_type
+            "w_type": self.w_type,
+            "amplitude": round(self.amplitude, 4),
+            "energy": round(self.energy, 4)
         }
 
 @dataclass

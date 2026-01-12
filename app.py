@@ -9,6 +9,7 @@ def main():
     """
     # 1. Root Setup (Hidden initially)
     root = tk.Tk()
+    root.configure(bg="#1e293b") # Set Dark Background immediately to prevent white flash
     root.withdraw() # Hide until ready
     
     # 2. Show Splash
@@ -49,7 +50,7 @@ def main():
             splash.destroy()
         
         root.deiconify()
-        
+    
     # Run load logic after short delay to let splash render
     root.after(100, load_app)
     
