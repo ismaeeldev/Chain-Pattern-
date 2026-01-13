@@ -57,7 +57,9 @@ class Splash(tk.Toplevel):
                 else:
                     self.img_ref = raw_img
                     
-                self.canvas.create_image(60, 80, image=self.img_ref, anchor='nw')
+                # User Request: Margin Top for alignment
+                # Moved from 80 -> 95
+                self.canvas.create_image(60, 95, image=self.img_ref, anchor='nw')
                 
                 # Title Offset
                 title_x = 160
