@@ -6,23 +6,9 @@ from matplotlib.widgets import SpanSelector
 import matplotlib.collections as mcoll
 from matplotlib.patches import Rectangle
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import threading
-import time
-import numpy as np
 
 # Import Theme colors for seamless integration
 from cpas.ui.theme import COLORS
-
-class Debouncer:
-    def __init__(self, interval):
-        self.interval = interval
-        self.timer = None
-
-    def call(self, func):
-        if self.timer is not None:
-            self.timer.cancel()
-        self.timer = threading.Timer(self.interval, func)
-        self.timer.start()
 
 class PlottingCanvas(tk.Frame):
     def __init__(self, parent):
@@ -35,12 +21,6 @@ class PlottingCanvas(tk.Frame):
         self.last_dna_objects = None
         self.last_x = None
         self.last_y = None
-        
-        # Zoom Optimization
-        self.zoom_debouncer = Debouncer(0.05) # 50ms
-        self.full_x = None
-        self.full_y = None
-        self.main_line = None
         
         # 1. Modern Styyyyyle
         # Use a context manager or global style? Global for app consistency.
@@ -236,7 +216,7 @@ class PlottingCanvas(tk.Frame):
         # but often Y is auto-scaled. Let's zoom both.
         ax.set_ylim([ycenter - yheight/2, ycenter + yheight/2])
         
-        self.canvas.draw_idle()
+        self.canvas.draw()
         
         # Push to navigation stack if possible so 'Back' works?
         # Standard toolbar push_current() is complex to invoke from outside.
@@ -293,103 +273,26 @@ class PlottingCanvas(tk.Frame):
             for text in leg.get_texts():
                 text.set_color(COLORS["text_light"])
             
-        self.canvas.draw_idle()
-
-    def setup_callbacks(self):
-        # Connect to limits change
-        self.ax.callbacks.connect('xlim_changed', self.on_xlim_changed)
-
-    def on_xlim_changed(self, event_ax):
-        """Debounced Viewport Update"""
-        if event_ax != self.ax: return
-        self.zoom_debouncer.call(lambda: self.after_idle(self.update_viewport))
-
-    def after_idle(self, func):
-        self.canvas_widget.after(0, func)
-
-    def update_viewport(self):
-        """Slices data to visible range for high performance."""
-        if self.full_x is None or self.main_line is None:
-            return
-            
-        # Get current limits
-        x_min, x_max = self.ax.get_xlim()
-        
-        if self.full_x_np is None: return
-        
-        try:
-             # Handle Date Conversion
-             import matplotlib.dates as mdates
-             import pandas as pd
-             
-             # Fallback buffer indices
-             idx_min = 0
-             idx_max = len(self.full_x_np)
-             
-             is_date = isinstance(self.full_x_np[0], (pd.Timestamp, np.datetime64, float))
-             
-             # If data is Timestamps, MPL limits are floats (days since epoch).
-             # We must convert MPL limits -> Timestamps to search.
-             # OR convert data to MPL nums (expensive).
-             
-             if isinstance(self.full_x_np[0], (pd.Timestamp, np.datetime64)):
-                 try:
-                     t_min = mdates.num2date(x_min).replace(tzinfo=None)
-                     t_max = mdates.num2date(x_max).replace(tzinfo=None)
-                     
-                     # Ensure full_x_np is timezone-naive if t_min is naive
-                     # This comparison often fails in pandas/numpy if mismatched.
-                     # Quick fix: Use searchsorted on VALUES if they match.
-                     
-                     idx_min = np.searchsorted(self.full_x_np, t_min)
-                     idx_max = np.searchsorted(self.full_x_np, t_max)
-                 except Exception:
-                     # If basic conversion failed, maybe data is already float? no.
-                     # Just fallback to full range.
-                     idx_min = 0
-                     idx_max = len(self.full_x_np)
-             else:
-                 # Standard Numeric
-                 idx_min = np.searchsorted(self.full_x_np, x_min)
-                 idx_max = np.searchsorted(self.full_x_np, x_max)
-                 
-             # Buffer (Avoid edge artifacts)
-             buffer = 100
-             idx_min = max(0, idx_min - buffer)
-             idx_max = min(len(self.full_x_np), idx_max + buffer)
-             
-             # Slice
-             sx = self.full_x_np[idx_min:idx_max]
-             sy = self.full_y_np[idx_min:idx_max]
-             
-             # Update Line
-             self.main_line.set_data(sx, sy)
-             self.canvas.draw_idle()
-             
-        except Exception as e:
-            # Fallback for safety (don't slice, just show all or don't update)
-            # print(f"Viewport Update Error: {e}") 
-            pass
+        self.canvas.draw()
 
     def plot_time_series(self, x, y):
-        # 1. Store Full Data (Optimized references)
-        self.full_x = x
-        self.full_y = y
+        # Themed Plot (Standard)
+        # Optimization: Downsample if > 10k points for display
+        # Keep features (peaks/troughs) correct by plotting on full data? 
+        # Peaks/troughs are scatters, they handle themselves.
+        # The line itself needs downsampling.
         
-        # Convert to numpy for fast slicing
-        if hasattr(x, 'values'): self.full_x_np = x.values
-        else: self.full_x_np = np.array(x)
+        limit = 10000
+        if len(x) > limit:
+            # Simple decimation: Take every Nth point
+            step = len(x) // limit
+            x_plot = x.iloc[::step]
+            y_plot = y.iloc[::step]
+        else:
+            x_plot = x
+            y_plot = y
             
-        if hasattr(y, 'values'): self.full_y_np = y.values
-        else: self.full_y_np = np.array(y)
-        
-        # Initial Plot
-        self.main_line, = self.ax.plot(x, y, label='Series', color=COLORS["accent"], linewidth=1.5)
-        
-        # Setup Dynamic Listener
-        if not hasattr(self, '_cb_connected'):
-            self.setup_callbacks()
-            self._cb_connected = True
+        self.ax.plot(x_plot, y_plot, label='Series', color=COLORS["accent"], linewidth=1.5)
 
     def plot_bar_chart(self, x, y):
         # Stem Plot style for performance & alignment
@@ -408,7 +311,7 @@ class PlottingCanvas(tk.Frame):
         self.ax.clear()
         cax = self.ax.imshow(matrix, cmap='Blues', origin='lower') # 'Blues' fits better than 'Greys'
         self.ax.set_title("Recurrence Plot", color=COLORS["text_light"])
-        self.canvas.draw_idle()
+        self.canvas.draw()
 
     def request_clear(self):
         if hasattr(self, 'on_clear_request'):
@@ -471,7 +374,7 @@ class PlottingCanvas(tk.Frame):
             )
             self.ax.add_patch(rect)
             
-        self.canvas.draw_idle()
+        self.canvas.draw()
 
     def plot_dna_layer(self, dna_objects, x_data):
         """
@@ -575,7 +478,7 @@ class PlottingCanvas(tk.Frame):
         if not hasattr(self, 'cid_motion'):
             self.cid_motion = self.canvas.mpl_connect("motion_notify_event", self.on_dna_hover)
             
-        self.canvas.draw_idle()
+        self.canvas.draw()
         
     def on_dna_hover(self, event):
         """
@@ -652,7 +555,7 @@ class PlottingCanvas(tk.Frame):
             self.ax.text(0.5, 0.95, "DNA Overlays Disabled in Histogram Mode", 
                          transform=self.ax.transAxes, ha='center', color=COLORS["warning"],
                          bbox=dict(facecolor=COLORS["bg_card"], alpha=0.8, boxstyle='round'))
-            self.canvas.draw_idle()
+            self.canvas.draw()
             return
         
         if not dna_objects:
@@ -757,7 +660,7 @@ class PlottingCanvas(tk.Frame):
         # Hook for Blitting Cache
         self.canvas.mpl_connect("draw_event", self.on_draw)
         
-        self.canvas.draw_idle()
+        self.canvas.draw()
         
     def on_draw(self, event):
         """Cache the background (minus tooltip) for blitting."""
@@ -852,3 +755,150 @@ class PlottingCanvas(tk.Frame):
         
         self.annot.set_text(text)
 
+        self.annot.set_text(text)
+
+    # -- Genome Engine Visualization --
+    def draw_genome_layers(self, match):
+        """
+        Draws the Genome Match (stacked rectangles) using PolyCollection.
+        """
+        import matplotlib.collections as mcoll
+        from cpas.ui.theme import COLORS
+        import numpy as np
+        import datetime
+        
+        # Clear previous
+        if hasattr(self, 'genome_collections'):
+            for c in self.genome_collections:
+                try: c.remove()
+                except: pass
+        self.genome_collections = []
+        
+        if not match: return
+        
+        # Guard: Check for x-data to map indices
+        if getattr(self, 'last_x', None) is None:
+            print("DEBUG: No last_x data to map Genome indices.")
+            return
+
+        x_data = self.last_x
+        n_points = len(x_data)
+        
+        # Calc Avg Delta for extrapolation
+        avg_delta = 0
+        if n_points > 1:
+            try:
+                # Handle Pandas Series or Numpy
+                if hasattr(x_data, 'values'):
+                    vals = x_data.values
+                else:
+                    vals = x_data
+                    
+                # Robust delta
+                avg_delta = (vals[-1] - vals[0]) / n_points
+            except:
+                pass
+
+        print(f"DEBUG: Draw Genome: {len(match.viz_blocks)} blocks")
+        
+        # Status Colors
+        status_colors = {
+            "VALID": COLORS["success"],
+            "MUTATION": COLORS["warning"],
+            "GAP": COLORS["danger"],
+            "OVERLAP": COLORS["accent"],
+            "MISSING": COLORS["text_dim"]
+        }
+        
+        # Y-Coords logic (Top/Bottom Gantt)
+        ylim = self.ax.get_ylim()
+        total_h = ylim[1] - ylim[0]
+        
+        # Draw vertically stacked in bottom 30% area
+        # Ensure we don't block the chart too much
+        # Maybe use top area? Or offset?
+        # User requested "Stacked vertically like Gantt".
+        # Let's use Bottom 25%.
+        
+        gantt_bottom = ylim[0]
+        gantt_top = ylim[0] + (total_h * 0.25)
+        
+        # Unique lines
+        lines_indices = list(set(b['line'] for b in match.viz_blocks))
+        num_lines = len(lines_indices) if lines_indices else 1
+        track_h = (gantt_top - gantt_bottom) / num_lines
+        
+        verts_by_color = {}
+        
+        for block in match.viz_blocks:
+            line_idx = block['line']
+            s_idx, e_idx = int(block['start']), int(block['end'])
+            status = block.get('status', 'MISSING')
+            
+            # 1. Map Indices -> X-Coordinates (Time/Float)
+            def get_x(idx):
+                import matplotlib.dates as mdates
+                if 0 <= idx < n_points:
+                    # In-bounds
+                    val = vals[idx]
+                else:
+                    # Extrapolate
+                    if idx < 0:
+                        val = vals[0] + (idx * avg_delta)
+                    else:
+                        val = vals[-1] + ((idx - (n_points - 1)) * avg_delta)
+                
+                # Convert to float if datetime
+                try:
+                    # Check if val has 'to_pydatetime' (pandas) or similar
+                    if hasattr(val, 'to_pydatetime'):
+                        return mdates.date2num(val.to_pydatetime())
+                    # Or numpy datetime64
+                    if isinstance(val, (np.datetime64, datetime.datetime)):
+                        return mdates.date2num(val)
+                    # Try direct conversion just in case
+                    return mdates.date2num(val)
+                except:
+                    # Already float?
+                    return float(val)
+
+            s_val = get_x(s_idx)
+            e_val = get_x(e_idx)
+            
+            # Y-Coords
+            # Stack upward from bottom? Or downward from top of gantt?
+            # Let's stack upward from bottom.
+            # line_idx 0 -> bottom track.
+            y_b = gantt_bottom + (line_idx * track_h)
+            y_t = y_b + track_h * 0.9 # Small gap
+            
+            # Rect Vertices
+            v = [(s_val, y_b), (e_val, y_b), (e_val, y_t), (s_val, y_t)]
+            
+            c = status_colors.get(status, "#888888")
+            if c not in verts_by_color:
+                verts_by_color[c] = []
+            verts_by_color[c].append(v)
+            
+        # Create Collections
+        for c, verts in verts_by_color.items():
+            pc = mcoll.PolyCollection(verts, facecolors=c, edgecolors=None, alpha=0.5, zorder=10) # High Z for vis
+            self.ax.add_collection(pc)
+            self.genome_collections.append(pc)
+            
+        self.canvas.draw()
+
+    def set_click_listener(self, callback):
+        """Callback(x, y)"""
+        self.on_chart_click = callback
+        if not hasattr(self, '_cid_click'):
+            self._cid_click = self.canvas.mpl_connect("button_press_event", self._on_click_internal)
+
+    def _on_click_internal(self, event):
+        if event.inaxes != self.ax: return
+        # Ignore if Pan/Zoom active
+        if hasattr(self, '_mpl_toolbar') and self._mpl_toolbar.mode != "":
+             return 
+             
+        if hasattr(self, 'on_chart_click') and self.on_chart_click:
+             self.on_chart_click(event.xdata, event.ydata)

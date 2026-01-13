@@ -5,6 +5,8 @@ import numpy as np
 from cpas.ui.plotting import PlottingCanvas
 from cpas.ui.theme import setup_theme, COLORS, FONTS
 from cpas.ui.components import ScrollableFrame, AlgorithmCard
+from cpas.core.genome import GenomeEngine
+from cpas.ui.mold_manager import MoldManager
 
 class CPASMainWindow:
     def __init__(self, root):
@@ -430,6 +432,8 @@ class CPASMainWindow:
         self.view_ts = ttk.Frame(self.viz_container, style="TFrame")
         self.plotting_canvas = PlottingCanvas(self.view_ts)
         self.plotting_canvas.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+        # Connect Genome Engine Click
+        self.plotting_canvas.set_click_listener(self.on_chart_node_click)
         
         # View 2: Recurrence
         # View 2: Recurrence
@@ -465,7 +469,7 @@ class CPASMainWindow:
         self.tab_buttons = {}
         
         # Tabs
-        self.btn_tab_widgets = self._create_panel_tab("Widgets", "widgets")
+        self.btn_tab_widgets = self._create_panel_tab("Molds (Genome)", "widgets")
         self.btn_tab_algos = self._create_panel_tab("Algorithms", "algos")
         self.btn_tab_console = self._create_panel_tab("Console", "console")
         
@@ -479,14 +483,15 @@ class CPASMainWindow:
         # self.bottom_content.pack(...) # Managed by toggle logic
         
         # Content Panes
-        from cpas.ui.widget_bank import WidgetBank
-        
-        # P1: Widgets
-        self.pane_widgets = WidgetBank(self.bottom_content, 
-                                     on_widget_click=self.jump_to_widgets,
-                                     on_search_request=self.request_search_pattern)
+        # P1: Molds (Genome)
+        self.pane_widgets = MoldManager(
+            self.bottom_content, 
+            engine=None, # Loaded on Extrema Detect
+            on_draw_request=self.plotting_canvas.draw_genome_layers
+        )
         # Keep ref for compatibility?
         self.widget_bank = self.pane_widgets
+        self.mold_manager = self.pane_widgets
         
         # P2: Algos
         self.pane_algos = ttk.Frame(self.bottom_content, style="Card.TFrame")
@@ -673,10 +678,15 @@ class CPASMainWindow:
             self.log("Analysis Complete.")
             
             # Populate Widget Bank
-            # Populate Widget Bank
-            if hasattr(self, 'widget_bank'):
-                self.widget_bank.load_widgets(self.chain)
-                # Auto-open Widgets panel (force open)
+            # Initialize Genome Engine
+            # Create list of all extrema indices
+            all_extrema = sorted(list(self.peaks) + list(self.troughs))
+            self.genome_engine = GenomeEngine(all_extrema, len(self.df))
+            
+            # Pass to Mold Manager
+            if hasattr(self, 'mold_manager'):
+                self.mold_manager.engine = self.genome_engine
+                # Auto-open Molds panel
                 self.toggle_panel("widgets")
                 if not self.panel_expanded: self.toggle_panel_state(force_open=True)
 
@@ -692,6 +702,59 @@ class CPASMainWindow:
         except Exception as e:
             self.log(f"Async Error: {e}")
             self.root.config(cursor="")
+            
+    def on_chart_node_click(self, x_val, y_val):
+        """
+        Handle clicks on chart to trigger Mold Application.
+        Maps Time -> Index -> Genome Engine.
+        """
+        if not hasattr(self, 'genome_engine') or not self.genome_engine:
+            return
+            
+        if self.df is None: return
+        
+        # Map x_val (Time/Float) to Index
+        # Matplotlib dates are floats.
+        # We need to find nearest timestamp in df.
+        try:
+            import matplotlib.dates as mdates
+            # Convert num back to datetime
+            dt = mdates.num2date(x_val)
+            # Remove timezone info if df is naive? Or match.
+            if self.df['timestamp'].dt.tz is None:
+                dt = dt.replace(tzinfo=None)
+            
+            # Find nearest in DataFrame
+            # Searchsorted requires sorted index. Assumed time sorted.
+            # Using get_loc method of simple logic
+            # diff = abs(self.df['timestamp'] - dt)
+            # idx = diff.idxmin() # Slow?
+            # Faster: searchsorted
+            idx = self.df['timestamp'].searchsorted(dt)
+            # Clamp
+            idx = min(max(0, idx), len(self.df)-1)
+            
+            # Verify its close?
+            # User might click empty space.
+            # We assume user clicks NEAR a node.
+            # GenomeEngine logic handles "Apply FROM this anchor".
+            # We pass this index.
+            
+            self.log(f"🖱️ Clicked Time: {dt} -> Index: {idx}")
+            self.mold_manager.on_node_click(idx)
+            
+        except Exception as e:
+            # Fallback if x_val is just index (e.g. Recurrence Plot)
+            # Recurrence plot calculates on Indices (0..N).
+            # If viz_mode is 'time_series', it's time.
+            # If plotting uses just Range(N), x_val is float index.
+            self.log(f"Click Error: {e}")
+            try:
+                idx = int(round(x_val))
+                if 0 <= idx < len(self.df):
+                    self.mold_manager.on_node_click(idx)
+            except:
+                pass
 
     def generate_recurrence(self):
         if not hasattr(self, 'df'): return
