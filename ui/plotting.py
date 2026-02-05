@@ -765,7 +765,7 @@ class PlottingCanvas(tk.Frame):
         import matplotlib.collections as mcoll
         from cpas.ui.theme import COLORS
         import numpy as np
-        import datetime
+        import matplotlib.dates as mdates
         
         # Clear previous
         if hasattr(self, 'genome_collections'):
@@ -778,113 +778,149 @@ class PlottingCanvas(tk.Frame):
         
         # Guard: Check for x-data to map indices
         if getattr(self, 'last_x', None) is None:
-            print("DEBUG: No last_x data to map Genome indices.")
             return
 
         x_data = self.last_x
         n_points = len(x_data)
         
-        # Calc Avg Delta for extrapolation
+        # Y-Axis Logic for Stacking
+        ylim = self.ax.get_ylim()
+        y_range = ylim[1] - ylim[0]
+        y_top = ylim[1]
+        
+        # Lane settings: Top Down Stacking
+        # Lane Height = 5% of chart range
+        lane_height = y_range * 0.05
+        lane_gap = y_range * 0.01
+        start_y = y_top - (y_range * 0.02) # Start just below top
+        
+        # Avg Delta for extrapolation
         avg_delta = 0
         if n_points > 1:
             try:
                 # Handle Pandas Series or Numpy
-                if hasattr(x_data, 'values'):
-                    vals = x_data.values
-                else:
-                    vals = x_data
-                    
-                # Robust delta
-                avg_delta = (vals[-1] - vals[0]) / n_points
+                xs = x_data.values if hasattr(x_data, 'values') else x_data
+                # Convert timestamps to numeric if needed
+                try:
+                    ts_0 = mdates.date2num(xs[0])
+                    ts_1 = mdates.date2num(xs[1])
+                    avg_delta = ts_1 - ts_0
+                except:
+                    avg_delta = xs[1] - xs[0]
             except:
                 pass
 
-        print(f"DEBUG: Draw Genome: {len(match.viz_blocks)} blocks")
-        
-        # Status Colors
-        status_colors = {
-            "VALID": COLORS["success"],
-            "MUTATION": COLORS["warning"],
-            "GAP": COLORS["danger"],
-            "OVERLAP": COLORS["accent"],
-            "MISSING": COLORS["text_dim"]
-        }
-        
-        # Y-Coords logic (Top/Bottom Gantt)
-        ylim = self.ax.get_ylim()
-        total_h = ylim[1] - ylim[0]
-        
-        # Draw vertically stacked in bottom 30% area
-        # Ensure we don't block the chart too much
-        # Maybe use top area? Or offset?
-        # User requested "Stacked vertically like Gantt".
-        # Let's use Bottom 25%.
-        
-        gantt_bottom = ylim[0]
-        gantt_top = ylim[0] + (total_h * 0.25)
-        
-        # Unique lines
-        lines_indices = list(set(b['line'] for b in match.viz_blocks))
-        num_lines = len(lines_indices) if lines_indices else 1
-        track_h = (gantt_top - gantt_bottom) / num_lines
-        
-        verts_by_color = {}
+        # Prepare Collections
+        verts = []
+        colors = []
         
         for block in match.viz_blocks:
+            # {line, start, end, color, status, error}
             line_idx = block['line']
-            s_idx, e_idx = int(block['start']), int(block['end'])
-            status = block.get('status', 'MISSING')
+            s_idx = block['start']
+            e_idx = block['end']
+            color = block.get('color', COLORS['accent'])
             
-            # 1. Map Indices -> X-Coordinates (Time/Float)
-            def get_x(idx):
-                import matplotlib.dates as mdates
-                if 0 <= idx < n_points:
-                    # In-bounds
-                    val = vals[idx]
-                else:
-                    # Extrapolate
-                    if idx < 0:
-                        val = vals[0] + (idx * avg_delta)
-                    else:
-                        val = vals[-1] + ((idx - (n_points - 1)) * avg_delta)
-                
-                # Convert to float if datetime
-                try:
-                    # Check if val has 'to_pydatetime' (pandas) or similar
-                    if hasattr(val, 'to_pydatetime'):
-                        return mdates.date2num(val.to_pydatetime())
-                    # Or numpy datetime64
-                    if isinstance(val, (np.datetime64, datetime.datetime)):
-                        return mdates.date2num(val)
-                    # Try direct conversion just in case
-                    return mdates.date2num(val)
-                except:
-                    # Already float?
-                    return float(val)
+            # Map X Coordinates
+            # Start
+            if 0 <= s_idx < n_points:
+                val_s = x_data.iloc[s_idx]
+                try: x_s = mdates.date2num(val_s)
+                except: x_s = val_s
+            else:
+                # Extrapolate
+                over = s_idx - (n_points - 1) if s_idx >= n_points else s_idx
+                if s_idx >= n_points:
+                    ref_val = x_data.iloc[-1]
+                    ref_x = mdates.date2num(ref_val) if hasattr(ref_val, 'to_pydatetime') or isinstance(ref_val, (np.datetime64, datetime.datetime)) else ref_val
+                    x_s = ref_x + (over * avg_delta)
+                else: 
+                     # Negative index (before start)
+                     ref_val = x_data.iloc[0]
+                     ref_x = mdates.date2num(ref_val)
+                     x_s = ref_x + (over * avg_delta)
 
-            s_val = get_x(s_idx)
-            e_val = get_x(e_idx)
+            # End
+            if 0 <= e_idx < n_points:
+                val_e = x_data.iloc[e_idx]
+                try: x_e = mdates.date2num(val_e)
+                except: x_e = val_e
+            else:
+                over = e_idx - (n_points - 1) if e_idx >= n_points else e_idx
+                if e_idx >= n_points:
+                    ref_val = x_data.iloc[-1]
+                    ref_x = mdates.date2num(ref_val) if hasattr(ref_val, 'to_pydatetime') or isinstance(ref_val, (np.datetime64, datetime.datetime)) else ref_val
+                    x_e = ref_x + (over * avg_delta)
+                else:
+                     ref_val = x_data.iloc[0]
+                     ref_x = mdates.date2num(ref_val)
+                     x_e = ref_x + (over * avg_delta)
+                
+            width = x_e - x_s
+            if width <= 0: width = avg_delta * 0.5 # Minimum width
             
-            # Y-Coords
-            # Stack upward from bottom? Or downward from top of gantt?
-            # Let's stack upward from bottom.
-            # line_idx 0 -> bottom track.
-            y_b = gantt_bottom + (line_idx * track_h)
-            y_t = y_b + track_h * 0.9 # Small gap
+            # Map Y Coordinates (Top-Down Stack)
+            block_y_top = start_y - (line_idx * (lane_height + lane_gap))
+            block_y_bot = block_y_top - lane_height
             
-            # Rect Vertices
-            v = [(s_val, y_b), (e_val, y_b), (e_val, y_t), (s_val, y_t)]
-            
-            c = status_colors.get(status, "#888888")
-            if c not in verts_by_color:
-                verts_by_color[c] = []
-            verts_by_color[c].append(v)
-            
-        # Create Collections
-        for c, verts in verts_by_color.items():
-            pc = mcoll.PolyCollection(verts, facecolors=c, edgecolors=None, alpha=0.5, zorder=10) # High Z for vis
+            # Rectangle Vertices
+            v = [
+                (x_s, block_y_bot),
+                (x_s + width, block_y_bot),
+                (x_s + width, block_y_top),
+                (x_s, block_y_top)
+            ]
+            verts.append(v)
+            colors.append(color)
+
+        if verts:
+            # Create Collection with List of Colors
+            pc = mcoll.PolyCollection(verts, facecolors=colors, edgecolors='none', alpha=0.7, zorder=20)
             self.ax.add_collection(pc)
             self.genome_collections.append(pc)
+            
+            # Draw Validations / Error Labels
+            for i, block in enumerate(match.viz_blocks):
+                err = block.get('error', 0)
+                status = block.get('status', 'VALID')
+                
+                # Center of block
+                # Recalculate or store coords? 
+                # Re-map X index to Value
+                s_idx = block['start']
+                e_idx = block['end']
+                
+                # Get mapped X values (same logic as above)
+                # Helper function would be better but inline for brevity
+                try:
+                    val_s = x_data.iloc[s_idx] if 0 <= s_idx < n_points else (x_data.iloc[-1] + (s_idx - n_points + 1)*avg_delta if s_idx >= n_points else x_data.iloc[0] + s_idx*avg_delta)
+                    val_e = x_data.iloc[e_idx] if 0 <= e_idx < n_points else (x_data.iloc[-1] + (e_idx - n_points + 1)*avg_delta if e_idx >= n_points else x_data.iloc[0] + e_idx*avg_delta)
+                    
+                    x_s = mdates.date2num(val_s) if hasattr(val_s, 'to_pydatetime') or isinstance(val_s, (np.datetime64, datetime.datetime)) else val_s
+                    x_e = mdates.date2num(val_e) if hasattr(val_e, 'to_pydatetime') or isinstance(val_e, (np.datetime64, datetime.datetime)) else val_e
+                except:
+                    continue
+
+                width = x_e - x_s
+                mid_x = x_s + width/2
+                
+                line_idx = block['line']
+                block_y_top = start_y - (line_idx * (lane_height + lane_gap))
+                block_y_mid = block_y_top - (lane_height / 2)
+                
+                # Label Content
+                if status != "VALID" or err != 0:
+                     label_color = COLORS["danger"] if status == "GAP" else COLORS["warning"]
+                     # Draw Error Text
+                     self.ax.text(mid_x, block_y_mid, f"{err:+d}", color='white', 
+                                  ha='center', va='center', fontsize=8, fontweight='bold',
+                                  bbox=dict(facecolor=label_color, edgecolor='none', boxstyle='round,pad=0.2', alpha=0.8),
+                                  zorder=25)
+                else:
+                    # Draw Widget Label (if space permits)
+                    lbl = block.get('label', '')
+                    if lbl and width > avg_delta*2:
+                         self.ax.text(mid_x, block_y_mid, lbl, color='white', ha='center', va='center', fontsize=7, zorder=21)
             
         self.canvas.draw()
 

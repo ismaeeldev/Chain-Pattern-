@@ -11,8 +11,12 @@ from cpas.ui.mold_manager import MoldManager
 class CPASMainWindow:
     def __init__(self, root):
         self.root = root
-        self.root.title("CPAS - Chain Pattern Analysis System")
+        self.root.title("CPAS - Chain Pattern Analysis System [DEBUG MODE ACTIVE]")
         self.root.geometry("1400x900") # Slightly larger for "Platform" feel
+        
+        # Initialize Async Bridge
+        from cpas.core.async_ops import setup_async
+        setup_async(self.root)
         
         # Apply Theme
         self.style = setup_theme(self.root)
@@ -26,6 +30,54 @@ class CPASMainWindow:
         self.selected_algo_card = None
         
         self.setup_layout()
+        
+    def show_toast(self, message, type="info"):
+        """
+        Subtle non-blocking notification overlay (Premium UI).
+        """
+        # Config
+        colors = {
+            "info": COLORS["accent"],
+            "success": COLORS["success"],
+            "warning": COLORS["warning"],
+            "error": COLORS["danger"]
+        }
+        icons = {
+            "info": "ℹ",
+            "success": "✔",
+            "warning": "⚠",
+            "error": "✖"
+        }
+        color = colors.get(type, COLORS["accent"])
+        icon = icons.get(type, "ℹ")
+        
+        # Container (Frame with solid border for contrast)
+        toast = tk.Frame(self.root, bg=color, padx=2, pady=2) # Border effect via padding
+        
+        # Inner Content
+        inner = tk.Frame(toast, bg=COLORS["bg_card"], padx=15, pady=10)
+        inner.pack(fill="both")
+        
+        # Icon
+        lbl_icon = tk.Label(inner, text=icon, font=("Segoe UI", 12, "bold"), bg=COLORS["bg_card"], fg=color)
+        lbl_icon.pack(side="left", padx=(0, 10))
+        
+        # Text
+        lbl_text = tk.Label(inner, text=message, font=("Segoe UI", 9), bg=COLORS["bg_card"], fg=COLORS["text_light"])
+        lbl_text.pack(side="left")
+        
+        # Left accent stripe (Visual polish)
+        stripe = tk.Frame(inner, bg=color, width=3)
+        stripe.pack(side="left", fill="y", padx=(0,10), before=lbl_icon)
+
+        # Place at bottom right
+        toast.place(relx=0.98, rely=0.95, anchor="se")
+        
+        # Fade out / Destroy
+        def fade():
+            toast.destroy()
+            
+        self.root.after(3500, fade)
         
     def setup_layout(self):
         """
@@ -90,7 +142,7 @@ class CPASMainWindow:
                                           values=["Exact (KMP)", "Fuzzy (Needleman-Wunsch)", "Multi (Aho-Corasick)"])
         self.combo_dna_mode.pack(fill=tk.X, padx=25, pady=5)
         
-        self._sidebar_btn("🔍 Search DNA", self.run_dna_search)
+        self.btn_dna_search = self._sidebar_btn("🔍 Search DNA", self.run_dna_search)
         
         # Ranked Match List (Hidden initially)
         self.match_results_frame = ttk.Frame(self.sidebar, style="Sidebar.TFrame")
@@ -213,13 +265,13 @@ class CPASMainWindow:
 
         mode = self.dna_mode_var.get()
         self.log(f"🧠 Scanning Genome ({mode})...")
-        self.root.config(cursor="wait")
+        self.btn_dna_search.config(text="Searching...", state="disabled")
         
         full_seq = [w.w_type for w in self.chain.widgets]
         
         # Callback
         def on_search_complete(result):
-            self.root.config(cursor="")
+            self.btn_dna_search.config(text="🔍 Search DNA", state="normal")
             if 'error' in result:
                 self.log(f"Search Error: {result['error']}")
                 return
@@ -245,6 +297,7 @@ class CPASMainWindow:
                 matches_dna.append(match_dna)
                 
             self.log(f"✅ Found {len(matches_dna)} Sibling DNA sequences.")
+            self.show_toast(f"Found {len(matches_dna)} DNA matches")
             
             # Visualize
             all_dna = [query_dna] + matches_dna
@@ -577,28 +630,47 @@ class CPASMainWindow:
             self.load_dataset_file(file_path)
 
     def load_dataset_file(self, file_path):
-        try:
-            from cpas.core.data_loader import DataLoader
-            self.df = DataLoader.load_csv(file_path)
-            self.loaded_filepath = file_path # Keep track of actual path
+        from cpas.core.data_loader import DataLoader
+        from cpas.core.async_ops import AsyncProcessor
+        
+        # 1. Show UI Feedback
+        self.show_toast(f"Loading {file_path.split('/')[-1]}...", type="info")
+        self.log(f"Loading data from {file_path}...")
+        
+        # 2. Define Worker (Thread Safe)
+        def _load_worker():
+            return DataLoader.load_csv(file_path)
             
-            # Update Cards
+        # 3. Define Callback (Main Thread)
+        def _on_loaded(result):
+            if isinstance(result, Exception):
+                self.show_toast(f"Load Failed: {str(result)}", type="error")
+                self.log(f"Error loading file: {str(result)}")
+                messagebox.showerror("Error", str(result))
+                return
+                
+            self.df = result
+            self.loaded_filepath = file_path
+            
+            # Update UI
             name = file_path.split('/')[-1]
             self.card_file.config(text=name[:18] + "..." if len(name)>18 else name)
             self.card_points.config(text=f"{len(self.df):,}")
             
-            self.log(f"Loaded: {name}")
+            self.log(f"Successfully loaded {len(self.df)} points.")
+            self.show_toast(f"Loaded {len(self.df)} points", type="success")
             
+            # Render Chart
             self.plotting_canvas.plot_data(self.df['timestamp'], self.df['value'])
             self.setup_anchor_support()
             
-            # Restore Recurrence Button if it was hidden
+            # Restore Controls
             if hasattr(self, 'rec_gen_btn'):
-                    self.rec_gen_btn.place(relx=0.5, rely=0.9, anchor=tk.CENTER, width=200, height=40)
-                    self.rec_gen_btn.lift()
-            
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
+                self.rec_gen_btn.place(relx=0.5, rely=0.9, anchor=tk.CENTER, width=200, height=40)
+                self.rec_gen_btn.lift()
+
+        # 4. Submit
+        AsyncProcessor.submit_generic(_load_worker, _on_loaded)
 
     def setup_anchor_support(self):
         self.plotting_canvas.enable_selector(self.on_time_select)
@@ -655,13 +727,14 @@ class CPASMainWindow:
             self.async_processor = AsyncProcessor(lambda f: self.root.after(0, f))
 
         self.log("🧠 Analyzing Extrema (Background)...")
-        self.root.config(cursor="wait")
+        self.card_extrema.config(text="Scanning...")
         
         prom = self.prominence_var.get()
         
         def on_complete(result):
             self.root.config(cursor="")
             if 'error' in result:
+                self.card_extrema.config(text="Error")
                 self.log(f"Extrema Error: {result['error']}")
                 return
                 
@@ -676,6 +749,7 @@ class CPASMainWindow:
             # Draw
             self.plotting_canvas.plot_data(self.df['timestamp'], self.df['value'], self.peaks, self.troughs)
             self.log("Analysis Complete.")
+            self.show_toast(f"Extrema Analysis Complete: {count} nodes")
             
             # Populate Widget Bank
             # Initialize Genome Engine
@@ -766,43 +840,54 @@ class CPASMainWindow:
         else:
             s, e = 0, len(self.df)
             
-        # 2. Check for Widget Chain (Primary Source now)
-        if hasattr(self, 'chain') and self.chain:
-            # Filter widgets in range
-            selected_widgets = [w for w in self.chain.widgets if w.start_idx >= s and w.end_idx <= e]
-            
-            if not selected_widgets:
-                self.log("⚠️ No widgets found in selection for Recurrence Plot.")
-                return
-
-            # Map Types to Ints
-            type_map = {'P2P': 1, 'T2T': 2, 'P2T': 3, 'T2P': 4}
-            values = [type_map.get(w.w_type, 0) for w in selected_widgets]
-            
-            self.log(f"🔄 Recurrence: Analyzing {len(values)} Widgets (Structural Mode).")
-            
-            # Use discrete matching (threshold < 1, normalize False)
-            try:
-                matrix, _ = RecurrencePlot.generate_matrix(values, threshold=0.1, normalize=False)
-                self.recurrence_canvas.plot_recurrence(matrix)
-                
-                # Check bounds for highlight?
-                # Recurrence plot usually plots 0..N indices. 
-                # These match the WIDGET list, not time series.
-                # So axis should be "Widget Index".
-                
-                # Hide button on success
-                if hasattr(self, 'rec_gen_btn'):
-                    self.rec_gen_btn.place_forget()
-                    
-            except Exception as e:
-                self.log(f"Recurrence Error: {e}")
-                
+        if hasattr(self, 'anchor_manager'):
+            s, e = self.anchor_manager.get_active_range(len(self.df))
         else:
-            # Fallback to Time Series if no chain? (Or Warning?)
-            # User said "Recurrence plot must be regenerated using Widget-aligned sequence".
-            # So fallback is discouraged.
-            self.log("⚠️ Please Detect Extrema first. Recurrence now analyzes Widget Structure.")
+            s, e = 0, len(self.df)
+            
+        # Detect numeric columns for Multi-Feature
+        numeric_df = self.df.select_dtypes(include=[np.number])
+        # Filter range
+        range_df = numeric_df.iloc[s:e]
+        
+        if range_df.empty:
+             self.log("⚠️ No data in range.")
+             return
+             
+        # Async this too? Recurrence on 3k rows is ~9M ops. Fast enough for numpy, but safer async.
+        self.log(f"🔄 Generating Recurrence Plot ({len(range_df)} rows, {len(range_df.columns)} features)...")
+        # Localized Feedback
+        if hasattr(self, 'rec_gen_btn'):
+             self.rec_gen_btn.config(text="Generating...", state="disabled")
+        
+        def run_rp():
+            # Run in thread
+            vals = range_df.values
+            return RecurrencePlot.generate_matrix(vals, threshold=None, normalize=True)
+            
+        def on_rp_ready(result):
+            # No cursor reset needed
+            if isinstance(result, dict) and 'error' in result: 
+                 self.log(f"Recurrence Error: {result.get('error')}")
+                 if hasattr(self, 'rec_gen_btn'): self.rec_gen_btn.config(text="Generate Plot Now", state="normal")
+                 return
+                 
+            # If wrapped, result is matrix? Or check structure?
+            # AsyncProcessor generic wrapper returns result of func.
+            matrix, dists = result
+            self.recurrence_canvas.plot_recurrence(matrix)
+            
+            if hasattr(self, 'rec_gen_btn'):
+                self.rec_gen_btn.place_forget()
+            
+            self.show_toast("Recurrence Plot Generated")
+                
+        # Initialize Async if needed
+        if not hasattr(self, 'async_processor'):
+            from cpas.core.async_ops import AsyncProcessor
+            self.async_processor = AsyncProcessor(lambda f: self.root.after(0, f))
+            
+        self.async_processor.submit_generic(run_rp, on_rp_ready)
 
 
     def run_algorithm(self):
@@ -854,8 +939,6 @@ class CPASMainWindow:
              return
              
         try:
-            import importlib
-            mod = importlib.import_module(f"cpas.algorithms.{mod_name}")
             sequence = [w.w_type for w in selected_widgets]
             
             # Prepare kwargs
@@ -871,36 +954,55 @@ class CPASMainWindow:
                     # Find rule
                     rule_str = next((t[1] for t in tmpls if t[0] == tmpl_name), None)
                     if rule_str:
-                         # Convert Rule (e.g. "P2P P2T") to String (e.g. "AC")
-                         # Rule is space separated? or just string?
-                         # TemplateDialog saves raw string. Let's assume space separated widgets.
                          parts = rule_str.split()
                          from cpas.algorithms import to_string
-                         # We need to reuse the mapping logic, but to_string takes a sequence of WIDGET OBJECTS or strings?
-                         # to_string takes a sequence list. "parts" is a list of strings 'P2P', 'T2T' etc.
-                         # algorithms/__init__.py to_string expects 'sequence' where s is the item.
-                         # It does mapping.get(s, 'X').
-                         # So passing ["P2P", "P2T"] works.
                          pattern_str = to_string(parts)
                          self.log(f"Using Template '{tmpl_name}': {rule_str} -> {pattern_str}")
-                         kwargs['patterns'] = [pattern_str] # Aho-Corasick expects list
-                         kwargs['pattern'] = pattern_str    # KMP/BM expect single 'pattern'
+                         kwargs['patterns'] = [pattern_str] 
+                         kwargs['pattern'] = pattern_str    
             
-            result = mod.run(sequence, **kwargs)
-            
-            self.log(f"--- RESULTS ---")
-            for k, v in result.items():
-                if k == 'matches' and isinstance(v, dict):
-                     self.log(f"{k}:")
-                     # Decoder mapping
-                     decode_map = {'A': 'P2P', 'B': 'T2T', 'C': 'P2T', 'D': 'T2P'}
-                     for pattern, count in v.items():
-                         # Convert "AC" -> "P2P P2T"
-                         readable = " ".join([decode_map.get(char, char) for char in pattern])
-                         self.log(f"  • {readable}: {count}")
+            # Wrapper for Async
+            def run_algo():
+                import importlib
+                mod = importlib.import_module(f"cpas.algorithms.{mod_name}")
+                return mod.run(sequence, **kwargs)
+                
+            def on_algo_complete(result):
+                # self.root.config(cursor="")
+                if isinstance(result, dict) and 'error' in result:
+                    self.log(f"Algo Error: {result.get('error')}")
+                    return
+                    
+                self.log(f"--- RESULTS ({algo_name_ui}) ---")
+                self.show_toast(f"{algo_name_ui} Complete")
+                
+                if isinstance(result, dict):
+                    for k, v in result.items():
+                        if k == 'matches' and isinstance(v, dict):
+                             self.log(f"{k}:")
+                             decode_map = {'A': 'P2P', 'B': 'T2T', 'C': 'P2T', 'D': 'T2P'}
+                             for pattern, count in v.items():
+                                 readable = " ".join([decode_map.get(char, char) for char in pattern])
+                                 self.log(f"  • {readable}: {count}")
+                        else:
+                             self.log(f"  {k}: {v}")
                 else:
-                    self.log(f"{k}: {v}")
-            self.log("-" * 30)
+                    self.log(f"Result: {result}")
+
+            # Submit to Async Processor
+            if not hasattr(self, 'async_processor'):
+                 from cpas.core.async_ops import AsyncProcessor
+                 # Use global or init
+                 self.async_processor = AsyncProcessor(lambda f: self.root.after(0, f))
+                 
+            self.async_processor.submit_generic(run_algo, on_algo_complete)
+            
+        except Exception as e:
+            self.log(f"Setup Error: {e}")
+                
+            # No Global Cursor
+            self.async_processor.submit_generic(run_algo, on_algo_complete)
+
             
         except Exception as ex:
             self.log(f"Algo Error: {ex}")

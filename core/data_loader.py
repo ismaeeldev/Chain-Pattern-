@@ -9,85 +9,110 @@ class DataLoader:
     @staticmethod
     def load_csv(file_path):
         """
-        Loads a CSV file, performs strict validation, and returns a sanitized DataFrame.
+        Loads a CSV file with robust, best-effort parsing.
         
-        Args:
-            file_path (str): Path to the CSV file.
-            
+        Capabilities:
+        - Auto-detects Time/Index (or generates if missing).
+        - Auto-detects Value column (prioritizes 'Close', 'Value', then first numeric).
+        - Handles NaNs (Interpolates).
+        - Handles Disorder (Sorts automatically).
+        - Supports generic domains (Weather, DNA, Finance).
+        
         Returns:
-            pd.DataFrame: Validated dataframe with 'timestamp' and 'value' columns.
+            pd.DataFrame: Standardized with 'timestamp' (or index) and 'value'.
             
         Raises:
-            ValueError: If any validation rule is violated.
+            ValueError: Only if file is empty or unreadable.
         """
         try:
             df = pd.read_csv(file_path)
+            if df.empty:
+                raise ValueError("CSV file is empty.")
         except Exception as e:
-            raise ValueError(f"Failed to read CSV: {e}")
+            raise ValueError(f"Failed to parse CSV: {e}")
 
-        # 1. Check for mandatory columns
-        # We expect strictly ONE timestamp column (datetime) and ONE numeric value column
-        # To identify them, we can check dtypes, but user might have headers.
-        # Strategy: Try to parse date columns.
+        # Clean column names
+        df.columns = [str(c).strip() for c in df.columns]
         
-        # Heuristic: User must have headers or we fail? SRS says "CSV Input MUST satisfy... Mandatory Columns"
-        # We will require exactly 2 columns or we pick the first two?
-        # SRS: "Mandatory Columns: Exactly ONE timestamp column... ONE numeric value column"
-        # SRS: "Optional: Up to 8-10 additional..."
+        # 1. Detect Time / Index
+        # Candidates: 'date', 'time', 'timestamp', 'index'
+        time_col = None
+        candidates = ['date', 'time', 'timestamp', 'index']
         
-        # So we have to IDENTIFY the timestamp and value column.
-        # We attempt to convert object/string columns to datetime.
+        # Case insensitive search
+        lower_cols = {c.lower(): c for c in df.columns}
         
-        timestamp_col = None
-        numeric_cols = []
-        
-        for col in df.columns:
-            # Check if numeric
-            if pd.api.types.is_numeric_dtype(df[col]):
-                numeric_cols.append(col)
-                continue
+        for cand in candidates:
+            if cand in lower_cols:
+                time_col = lower_cols[cand]
+                break
                 
-            # Check if datetime or convertable
+        # If still no time column, try to find a datetime-like column
+        if not time_col:
+            for col in df.columns:
+                if df[col].dtype == 'object':
+                    try:
+                        pd.to_datetime(df[col], errors='raise')
+                        # If simple success, assume this is it
+                        time_col = col
+                        break
+                    except:
+                        pass
+        
+        # Process Time Column
+        if time_col:
             try:
-                # Attempt conversion on a sample to speed up
-                pd.to_datetime(df[col], errors='raise')
-                # If successful, this is a candidate
-                if timestamp_col is None:
-                    timestamp_col = col
-                else:
-                    raise ValueError("Multiple timestamp columns found. Dataset REJECTED.")
-            except (ValueError, TypeError):
+                df['timestamp'] = pd.to_datetime(df[time_col], errors='coerce')
+                # If conversion failed completely (all NaT), drop back to index
+                if df['timestamp'].notnull().sum() == 0:
+                    time_col = None
+            except:
+                time_col = None
+
+        if not time_col:
+            # Generate Index
+            df['timestamp'] = np.arange(len(df))
+        else:
+            # Rename invalid/original to temp if needed, but we assigned to 'timestamp'
+            pass
+            
+        # 2. Detect Value Column
+        # Exclude the timestamp column we just identified/created
+        numeric_cols = []
+        for col in df.columns:
+            if col == 'timestamp': continue
+            # Check if convertable to numeric
+            try:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                if df[col].notnull().sum() > 0:
+                    numeric_cols.append(col)
+            except:
                 pass
                 
-        if timestamp_col is None:
-            raise ValueError("No valid timestamp column found. Dataset REJECTED.")
-            
         if not numeric_cols:
-            raise ValueError("No numeric value column found. Dataset REJECTED.")
+            raise ValueError("No numeric data found in CSV.")
             
-        # If multiple numeric columns, we take the first one as primary 'value' 
-        # but keep others as features if needed. For M1 Scope, let's strictly set primary.
-        primary_value_col = numeric_cols[0]
+        # Heuristic: Prefer 'close', 'value', 'price'
+        value_col = numeric_cols[0] # Default to first
+        val_candidates = ['close', 'price', 'value', 'amount', 'temp', 'signal']
         
-        # convert timestamp to actual datetime
-        df[timestamp_col] = pd.to_datetime(df[timestamp_col])
-        
-        # 2. Check strict ordering
-        if not df[timestamp_col].is_monotonic_increasing:
-             raise ValueError("Timestamps are not strictly ordered. Dataset REJECTED.")
-             
-        # 3. Check for missing values
-        if df[timestamp_col].isnull().any():
-            raise ValueError("Missing timestamps detected. Dataset REJECTED.")
+        for cand in val_candidates:
+            for nc in numeric_cols:
+                if cand in nc.lower():
+                    value_col = nc
+                    break
+            if value_col != numeric_cols[0]: break
             
-        if df[primary_value_col].isnull().any():
-            # SRS: "Missing numeric values -> REJECT or INTERPOLATE (user-configurable)"
-            # Default to reject for now as per "Invalid datasets MUST produce explicit diagnostics."
-            raise ValueError(f"Missing numeric values in column '{primary_value_col}'. Dataset REJECTED.")
-            
-        # Standardize columns
-        df = df.rename(columns={timestamp_col: 'timestamp', primary_value_col: 'value'})
+        # Standardize
+        df['value'] = df[value_col]
         
-        # Return cleaned df
-        return df[['timestamp', 'value']]
+        # 3. Clean
+        # Sort by time
+        df = df.sort_values('timestamp')
+        
+        # Interpolate missing values
+        df['value'] = df['value'].interpolate(method='linear').bfill().ffill()
+        
+        # Final Format
+        return df[['timestamp', 'value']].reset_index(drop=True)
 

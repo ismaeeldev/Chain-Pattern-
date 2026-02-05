@@ -1,53 +1,79 @@
 from dataclasses import dataclass, field
-from typing import List, Literal, Optional, Dict
+from typing import List, Literal, Optional, Dict, Union
+import uuid
+
+@dataclass
+class GenomeNode:
+    """
+    Core Unit: A specific point in time (User Prompt: 'Node')
+    """
+    index: int      # bar index
+    price: float
+    type: str       # 'peak' or 'trough'
+
+@dataclass
+class Widget:
+    """
+    Genome Read: A segment of time between nodes.
+    Refactored to support Elasticity and constraints.
+    """
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    bars: int = 1  # Default/Target length
+    color: str = "#888888"
+    
+    # Constraints
+    min_bars: Optional[int] = None
+    max_bars: Optional[int] = None
+    is_elastic: bool = False # If True, can stretch to fit Node Pair
+    
+    # Metadata
+    label: str = ""
 
 @dataclass
 class MoldLine:
     """
-    A single horizontal track in the Genome Mold.
-    Defined by a sequence of Ratios relative to a Base Unit.
+    Horizontal Track.
+    Wraps a sequence of items with an optional time offset.
     """
-    label: str # e.g. "Fibonacci Expansion"
-    ratios: List[float] # e.g. [1.0, 0.618, 1.618] -> Sequential widgets
-    
-    def get_cumulative_ratios(self) -> List[float]:
-        """Returns cumulative distance from t0 for each node."""
-        cum = 0.0
-        res = []
-        for r in self.ratios:
-            cum += r
-            res.append(cum)
-        return res
+    items: List[Union['Widget', 'Mold']] = field(default_factory=list)
+    offset: int = 0  # bars shift from mold start
 
 @dataclass
 class Mold:
     """
-    A full Pattern Template (Genome) composed of multiple lines.
+    Pattern Template.
+    Supports Nested Molds (Recursive Composition).
     """
-    name: str # e.g. "Elliott Wave Impulse"
-    lines: List[MoldLine] = field(default_factory=list)
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = "New Mold"
     description: str = ""
+    
+    # Structural Content
+    lines: List[MoldLine] = field(default_factory=list)
+    
+    def add_line(self):
+        self.lines.append(MoldLine())
 
 @dataclass
 class Deviation:
     """
-    Report of a mismatch between Expected and Found node.
+    Genome Alignment Result.
     """
-    mold_line_idx: int
+    mold_name: str
+    line_idx: int
     widget_idx: int
-    expected_x: float
-    found_x: Optional[float]
-    deviation: float # found - expected
-    status: Literal['VALID', 'GAP', 'OVERLAP', 'MUTATION', 'MISSING']
-    
+    expected_bar: int
+    actual_bar: Optional[int]
+    error: int # actual - expected (+ late/gap, - early/overlap)
+    type: Literal['GAP', 'OVERLAP', 'VALID', 'MISSING']
+
 @dataclass
 class GenomeMatch:
     """
-    Result of applying a Mold to a specific anchor node.
+    Result of aligning a Mold to a Node.
     """
     mold_name: str
     anchor_idx: int
-    base_duration: float
     deviations: List[Deviation]
-    # For visualization: List of (start_x, end_x, status) for rectangles
+    # Visualization Data
     viz_blocks: List[Dict] = field(default_factory=list)

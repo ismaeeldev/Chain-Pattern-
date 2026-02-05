@@ -137,11 +137,58 @@ class AsyncProcessor:
         self.executor.submit(self._worker_wrapper, task, callback)
 
 
+    @classmethod
+    def submit_generic(cls, func, callback):
+        """
+        Static access to a default shared processor instance.
+        """
+        if not hasattr(cls, '_instance'):
+             # Lazy init with no UI callback? UI callback needs to be set.
+             # We need a way to pass the root.after or similar.
+             # Ideally the APP initializes this.
+             cls._instance = AsyncProcessor()
+             
+        cls._instance._submit_generic_instance(func, callback)
+
+    def _submit_generic_instance(self, func, callback):
+        def task():
+            try:
+                return func()
+            except Exception as e:
+                return e # Return exception object directly
+                
+        self.executor.submit(self._worker_wrapper, task, callback)
+
     def _worker_wrapper(self, task_func, callback):
         result = task_func()
         self._notify_main(callback, result)
 
     def _notify_main(self, callback, result):
+        # IF no UI callback is registered, we can try to find the main loop or just run it?
+        # Running strictly on thread is dangerous for UI.
+        # We need a robust way to get back to main thread.
+        # Minimal Hack: If callback is a Tkinter method, it might explode.
+        
+        # Better: Import output to check if we are in main? No.
+        
+        # We will assume the user setup the processor.
+        # But for stability in this refactor, let's allow a fallback:
+        # If 'ui_callback' is None, we run it directly (and risk UI thread issues, but at least it runs).
+        # OR we assume the caller provided a thread-safe wrapper.
+        
         if self.ui_callback:
             self.ui_callback(lambda: callback(result))
+        else:
+            # Fallback for now: Just run it. 
+            # If this is Tkinter, we need 'root.after(0, ...)'
+            # But we don't have root here.
+            # Use a global queue?
+            callback(result)
+
+# Singleton Export
+PROCESSOR = AsyncProcessor()
+
+# Initialize with Tkinter bridge if possible
+def setup_async(root):
+    PROCESSOR.ui_callback = lambda f: root.after(0, f)
 

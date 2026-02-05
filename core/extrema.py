@@ -161,10 +161,12 @@ class ExtremaDetector:
             
         # Sort by value (descending for peaks, ascending for troughs)
         # We prioritize the "strongest" extrema.
+        # CRITICAL: Use kind='stable' to ensure determinism for identical values.
         if is_peak:
-            sorted_idx = indices[np.argsort(y[indices])[::-1]]
+            # Sort by value ascending (stable), then reverse for descending
+            sorted_idx = indices[np.argsort(y[indices], kind='stable')[::-1]]
         else:
-            sorted_idx = indices[np.argsort(y[indices])]
+            sorted_idx = indices[np.argsort(y[indices], kind='stable')]
             
         keep = []
         for idx in sorted_idx:
